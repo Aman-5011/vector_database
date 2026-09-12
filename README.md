@@ -42,3 +42,14 @@ We implemented a custom Hierarchical Navigable Small World (HNSW) graph to perfo
 * **ef_construction:** Controls how broadly the algorithm searches for good neighbors *while building the graph*. 
 * **ef_search:** Controls the breadth of the search candidate queue *during querying*. This acts as our primary **Speed vs. Accuracy Tradeoff Knob**. 
 * **Lazy Deletion:** When a node is deleted, we just add its internal ID to a `deleted` Set rather than physically rebuilding the graph connections. During search, the algorithm can still travel *through* the deleted node to find its neighbors, but filters it out of the final returned results.
+
+## Stage 4: Benchmarking and Evaluation
+
+### What this Benchmark Measures
+We measure the **Speed vs. Accuracy Tradeoff** of our custom HNSW graph against mathematical ground truth. 
+
+* **Ground Truth (Exact Index):** Used as the infallible baseline. Because it exhaustively checks all 50,000 vectors, its results are considered 100% accurate. 
+* **Recall@K (Accuracy):** The percentage of true nearest neighbors (found by ExactIndex) that the HNSW index successfully retrieved. 
+* **QPS (Speed):** Queries Per Second. Measures how fast the system can navigate the graph.
+* **ef_search Knob:** This HNSW parameter dictates the breadth of the search queue. A small `ef_search` makes the algorithm run incredibly fast (High QPS) but prone to getting lost in the graph (Low Recall). A large `ef_search` forces it to check many paths, driving up Recall but lowering QPS.
+* **Hardware Dependency:** The raw QPS numbers you see will depend strictly on your local CPU. However, the *curve* (the relationship showing that higher recall costs more time) is a universal algorithmic property.
