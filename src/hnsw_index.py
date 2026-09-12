@@ -39,6 +39,7 @@ class HNSWIndex:
         return float(np.dot(query, self.vectors[idx]))
 
     def _similarity_nodes(self, idx1: int, idx2: int) -> float:
+        """Calculates cosine similarity between two existing nodes."""
         return float(np.dot(self.vectors[idx1], self.vectors[idx2]))
 
     def _greedy_search(self, query: np.ndarray, entry_point: int, level: int) -> int:
@@ -64,9 +65,9 @@ class HNSWIndex:
         """
         visited = set(entry_points)
         
-        # C is a max-heap (implemented via negative similarities) to extract the closest candidates.
+        # C is a max-heap (implemented via negative similarities)
         C = []
-        # W is a min-heap to maintain the top `ef` closest nodes found so far.
+        # W is a min-heap to maintain the top `ef` closest nodes
         W = []
         
         for ep in entry_points:
@@ -78,10 +79,8 @@ class HNSWIndex:
             neg_c_sim, c = heapq.heappop(C)
             c_sim = -neg_c_sim
             
-            # W[0][0] is the worst similarity among the top `ef` candidates
             furthest_sim_in_W = W[0][0]
             
-            # If the best candidate is worse than the worst in our top-ef list, stop exploring
             if c_sim < furthest_sim_in_W:
                 break
                 
@@ -99,10 +98,38 @@ class HNSWIndex:
                             
         return W
 
-    def _select_neighbors(self, candidates: List[Tuple[float, int]], M: int) -> List[int]:
-        """Simple strategy: greedily pick the M closest candidates."""
+    def _select_neighbors(self, base_node_idx: int, candidates: List[Tuple[float, int]], M: int) -> List[int]:
+        """
+        Principled HNSW neighbor-selection heuristic.
+        Enforces spatial diversity by checking if a candidate is closer to the 
+        base node than it is to any already-selected neighbor.
+        """
         candidates.sort(key=lambda x: x[0], reverse=True)
-        return [idx for sim, idx in candidates[:M]]
+        selected = []
+        
+        for sim_to_base, c_idx in candidates:
+            if len(selected) >= M:
+                break
+                
+            is_diverse = True
+            for s_idx in selected:
+                sim_c_s = self._similarity_nodes(c_idx, s_idx)
+                if sim_c_s > sim_to_base:
+                    is_diverse = False
+                    break
+                    
+            if is_diverse:
+                selected.append(c_idx)
+                
+        # Fallback to ensure graph connectivity if we pruned too heavily
+        if len(selected) < M:
+            for sim_to_base, c_idx in candidates:
+                if len(selected) >= M:
+                    break
+                if c_idx not in selected:
+                    selected.append(c_idx)
+                    
+        return selected
 
     def insert(self, uid: str, vector: np.ndarray):
         """Inserts a single vector into the HNSW graph."""
@@ -117,7 +144,6 @@ class HNSWIndex:
         self.id_to_idx[uid] = idx
         
         l = self._random_level()
-        # Initialize graph layers for this node
         self.graph.append([[] for _ in range(l + 1)])
         
         if self.entry_point is None:
@@ -127,27 +153,24 @@ class HNSWIndex:
             
         curr_obj = self.entry_point
         
-        # Phase 1: Greedily route down to the new node's top level
         for lc in range(self.max_level, l, -1):
             curr_obj = self._greedy_search(vector, curr_obj, lc)
             
         entry_points = [curr_obj]
         
-        # Phase 2: Insert into the node's assigned levels
         for lc in range(min(self.max_level, l), -1, -1):
             candidates = self._search_layer(vector, entry_points, self.ef_construction, lc)
-            neighbors = self._select_neighbors(candidates, self.M if lc > 0 else self.M0)
             
-            # Add bidirectional connections
+            neighbors = self._select_neighbors(idx, candidates, self.M if lc > 0 else self.M0)
+            
             for neighbor in neighbors:
                 self.graph[idx][lc].append(neighbor)
                 self.graph[neighbor][lc].append(idx)
                 
-                # Enforce M limit on the neighbor
                 M_max = self.M0 if lc == 0 else self.M
                 if len(self.graph[neighbor][lc]) > M_max:
                     conn_sims = [(self._similarity_nodes(neighbor, n), n) for n in self.graph[neighbor][lc]]
-                    self.graph[neighbor][lc] = self._select_neighbors(conn_sims, M_max)
+                    self.graph[neighbor][lc] = self._select_neighbors(neighbor, conn_sims, M_max)
             
             entry_points = [idx for sim, idx in candidates]
             
@@ -165,18 +188,16 @@ class HNSWIndex:
     def delete(self, uid: str):
         """
         Lazy deletion: marks node as deleted without physically severing graph edges.
-        This preserves navigation structure but removes it from search results.
         """
         if uid not in self.id_to_idx:
             raise KeyError(f"ID {uid} not found.")
         idx = self.id_to_idx[uid]
         self.deleted.add(idx)
-        del self.id_to_idx[uid] # Remove from lookup
+        del self.id_to_idx[uid]
 
     def search(self, query: np.ndarray, k: int = 5, ef_search: int = None) -> List[Tuple[str, float]]:
         """
         Approximate search navigating the HNSW graph.
-        Does NOT perform an exhaustive scan.
         """
         if query.shape != (self.dim,):
             raise ValueError("Dimension mismatch.")
@@ -191,14 +212,11 @@ class HNSWIndex:
         
         curr_obj = self.entry_point
         
-        # Fast route down to layer 0
         for lc in range(self.max_level, 0, -1):
             curr_obj = self._greedy_search(query, curr_obj, lc)
             
-        # Broad candidate search at layer 0 using ef_search
         candidates = self._search_layer(query, [curr_obj], ef, 0)
         
-        # Filter deleted nodes and format output
         results = []
         for sim, idx in candidates:
             if idx not in self.deleted:
